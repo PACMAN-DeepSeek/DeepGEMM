@@ -10,6 +10,7 @@ from typing import Tuple
 from . import interleave_ffma
 from .runtime import Runtime, RuntimeCache
 from .template import typename_map
+from filelock import FileLock
 
 runtime_cache = RuntimeCache()
 
@@ -122,30 +123,34 @@ def build(name: str, arg_defs: tuple, code: str) -> Runtime:
     os.makedirs(path, exist_ok=True)
     args_path = f'{path}/kernel.args'
     src_path = f'{path}/kernel.cu'
-    put(args_path, ', '.join([f"('{arg_def[0]}', {typename_map[arg_def[1]]})" for arg_def in arg_defs]))
-    put(src_path, code)
+    lock_path = f'{path}/lock'
+    lock = FileLock(lock_path, thread_local=False)
+    with lock:
+        put(args_path, ', '.join([f"('{arg_def[0]}', {typename_map[arg_def[1]]})" for arg_def in arg_defs]))
+        put(src_path, code)
 
-    # Compile into a temporary SO file
-    so_path = f'{path}/kernel.so'
-    tmp_so_path = f'{make_tmp_dir()}/nvcc.tmp.{str(uuid.uuid4())}.{hash_to_hex(so_path)}.so'
+        # Compile into a temporary SO file
+        so_path = f'{path}/kernel.so'
+        tmp_so_path = f'{make_tmp_dir()}/nvcc.tmp.{str(uuid.uuid4())}.{hash_to_hex(so_path)}.so'
 
-    # Compile
-    command = [get_nvcc_compiler()[0],
-               src_path, '-o', tmp_so_path,
-               *flags,
-               *[f'-I{d}' for d in include_dirs]]
-    if os.getenv('DG_JIT_DEBUG', None) or os.getenv('DG_JIT_PRINT_NVCC_COMMAND', False):
-        print(f'Compiling JIT runtime {name} with command {command}')
-    return_code = subprocess.check_call(command)
-    assert return_code == 0, f'Failed to compile {src_path}'
+        # Compile
+        command = [get_nvcc_compiler()[0],
+                   src_path, '-o', tmp_so_path,
+                   *flags,
+                   *[f'-I{d}' for d in include_dirs]]
+        if os.getenv('DG_JIT_DEBUG', None) or os.getenv('DG_JIT_PRINT_NVCC_COMMAND', False):
+            print(f'Compiling JIT runtime {name} with command {command}')
+        return_code = subprocess.check_call(command)
+        assert return_code == 0, f'Failed to compile {src_path}'
 
-    # Interleave FFMA reuse
-    if enable_sass_opt:
-        interleave_ffma.process(tmp_so_path)
+        # Interleave FFMA reuse
+        if enable_sass_opt:
+            interleave_ffma.process(tmp_so_path)
 
-    # Atomic replace SO file
-    os.replace(tmp_so_path, so_path)
+        # Atomic replace SO file
+        os.replace(tmp_so_path, so_path)
 
-    # Put cache and return
-    runtime_cache[path] = Runtime(path)
-    return runtime_cache[path]
+        # Put cache and return
+        runtime_cache[path] = Runtime(path)
+        return runtime_cache[path]
+
